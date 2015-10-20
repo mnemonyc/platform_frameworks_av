@@ -57,9 +57,9 @@
 #include "include/avc_utils.h"
 
 #ifdef USE_SAMSUNG_COLORFORMAT
-        static const int OMX_SEC_COLOR_FormatNV12LPhysicalAddress = 0x7F000002;
-        return OMX_SEC_COLOR_FormatNV12LPhysicalAddress;
-#else
+#include <sec_format.h>
+#endif
+
 namespace android {
 
 #ifdef USE_SAMSUNG_COLORFORMAT
@@ -1867,6 +1867,9 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
         return err;
     }
 
+    sp<MetaData> meta = mSource->getFormat();
+
+
 #ifdef USE_SAMSUNG_COLORFORMAT
     OMX_COLOR_FORMATTYPE eColorFormat;
 
@@ -1893,9 +1896,6 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
         initNativeWindowCrop();
     }
 #else
-    OMX_COLOR_FORMATTYPE eNativeColorFormat = def.format.video.eColorFormat;
-    setNativeWindowColorFormat(eNativeColorFormat);
-
     err = native_window_set_buffers_geometry(
             mNativeWindow.get(),
             def.format.video.nFrameWidth,
@@ -1903,7 +1903,11 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
             def.format.video.eColorFormat);
 #endif
 
-    sp<MetaData> meta = mSource->getFormat();
+    if (err != 0) {
+        ALOGE("native_window_set_buffers_geometry failed: %s (%d)",
+                strerror(-err), -err);
+        return err;
+    }
 
     int32_t rotationDegrees;
     if (!meta->findInt32(kKeyRotation, &rotationDegrees)) {
@@ -1923,18 +1927,33 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
         usage |= GRALLOC_USAGE_PROTECTED;
     }
 
-    err = setNativeWindowSizeFormatAndUsage(
-            mNativeWindow.get(),
-            def.format.video.nFrameWidth,
-            def.format.video.nFrameHeight,
-            def.format.video.eColorFormat,
-            rotationDegrees,
-            usage | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_EXTERNAL_DISP);
+
+    // Make sure to check whether either Stagefright or the video decoder
+    // requested protected buffers.
+    if (usage & GRALLOC_USAGE_PROTECTED) {
+        // Verify that the ANativeWindow sends images directly to
+        // SurfaceFlinger.
+        int queuesToNativeWindow = 0;
+        err = mNativeWindow->query(
+                mNativeWindow.get(), NATIVE_WINDOW_QUEUES_TO_WINDOW_COMPOSER,
+                &queuesToNativeWindow);
+        if (err != 0) {
+            ALOGE("error authenticating native window: %d", err);
+            return err;
+        }
+        if (queuesToNativeWindow != 1) {
+            ALOGE("native window could not be authenticated");
+            return PERMISSION_DENIED;
+        }
+    }
+
+    ALOGV("native_window_set_usage usage=0x%lx", usage);
+    err = native_window_set_usage(
+            mNativeWindow.get(), usage | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_EXTERNAL_DISP);
+
     if (err != 0) {
         return err;
     }
-    err = native_window_set_usage(
-            mNativeWindow.get(), usage | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_EXTERNAL_DISP);
 
     int minUndequeuedBufs = 0;
     err = mNativeWindow->query(mNativeWindow.get(),
